@@ -8,6 +8,7 @@ import (
 	"skiptui/internal/config"
 	"skiptui/internal/isolation"
 	"skiptui/internal/session"
+	"skiptui/internal/tunnel"
 	"syscall"
 
 	"github.com/spf13/cobra"
@@ -66,10 +67,19 @@ var runCmd = &cobra.Command{
 
 		// Pick isolation engine
 		engine := sup.SelectBestEngine()
+		if profile.Protocol == config.ProtocolOpenVPN || profile.Protocol == config.ProtocolWireGuard {
+			if netnsEng := isolation.NewNetnsEngine(); netnsEng.CheckCapabilities() != nil {
+				return fmt.Errorf("VPN protocol '%s' requires Linux Network Namespace capabilities (CAP_NET_ADMIN). Running on host would redirect entire system traffic. Run 'sudo make setcap' or run with sudo", profile.Protocol)
+			}
+			engine = isolation.NewNetnsEngine()
+		}
 
 		sb, err := engine.CreateSandbox(context.Background(), "cli-exec", profile)
 		if err != nil {
-			// Fallback to EnvProxyEngine
+			if profile.Protocol == config.ProtocolOpenVPN || profile.Protocol == config.ProtocolWireGuard {
+				return fmt.Errorf("failed to create sandbox for VPN: %w", err)
+			}
+			// Fallback to EnvProxyEngine for proxy protocols
 			engine = isolation.NewEnvProxyEngine()
 			sb, err = engine.CreateSandbox(context.Background(), "cli-exec", profile)
 			if err != nil {
@@ -79,6 +89,20 @@ var runCmd = &cobra.Command{
 		defer func() {
 			_ = engine.DestroySandbox(context.Background(), sb)
 		}()
+
+		// For VPN protocols, initialize and start the tunnel adapter
+		if profile.Protocol == config.ProtocolOpenVPN || profile.Protocol == config.ProtocolWireGuard {
+			tunWorker, err := tunnel.CreateTunnel(sb, profile)
+			if err != nil {
+				return fmt.Errorf("failed to create tunnel worker: %w", err)
+			}
+			if err := tunWorker.Start(context.Background()); err != nil {
+				return fmt.Errorf("failed to start tunnel worker: %w", err)
+			}
+			defer func() {
+				_ = tunWorker.Stop()
+			}()
+		}
 
 		var execCmd *exec.Cmd
 		if envEng, ok := engine.(*isolation.EnvProxyEngine); ok {

@@ -47,6 +47,19 @@ func SweepOrphanNamespaces() []string {
 		}
 	}
 
+	// Also sweep orphan veth host interfaces (vh-*)
+	if lOut, lErr := exec.Command("ip", "-o", "link", "show").Output(); lErr == nil {
+		for _, line := range strings.Split(string(lOut), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) >= 2 {
+				ifName := strings.TrimSuffix(fields[1], ":")
+				if strings.HasPrefix(ifName, "vh-") {
+					_ = exec.Command("ip", "link", "del", ifName).Run()
+				}
+			}
+		}
+	}
+
 	return cleaned
 }
 

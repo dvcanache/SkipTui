@@ -36,9 +36,9 @@ func NewWireGuardTunnel(sb *isolation.SandboxInfo, profile *config.Profile) (*Wi
 }
 
 func (w *WireGuardTunnel) Start(ctx context.Context) error {
-	if w.sb.IsRootless {
-		w.running = true
-		return nil
+	// Refuse to run on host root namespace to protect host system traffic
+	if w.sb.IsRootless || w.sb.Namespace == "" || strings.HasPrefix(w.sb.Namespace, "env-") || strings.HasPrefix(w.sb.Namespace, "rootless-") {
+		return fmt.Errorf("WireGuard requires Linux Network Namespace isolation (CAP_NET_ADMIN). Running on host would redirect entire system traffic. Run 'sudo make setcap' or run with sudo")
 	}
 
 	// 1. Create WireGuard link in host: `ip link add <iface> type wireguard`

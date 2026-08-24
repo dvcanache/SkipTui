@@ -86,10 +86,22 @@ func (s *Supervisor) LaunchSession(ctx context.Context, profile *config.Profile,
 	// 1. Choose best working isolation engine
 	engine := s.SelectBestEngine()
 
-	// 2. Create sandbox (with fallback if engine fails)
+	// Strict check for VPN profiles: OpenVPN and WireGuard MUST use network namespace isolation
+	// to prevent leaking or redirecting host system traffic.
+	if profile.Protocol == config.ProtocolOpenVPN || profile.Protocol == config.ProtocolWireGuard {
+		if s.netnsEng.CheckCapabilities() != nil {
+			return nil, fmt.Errorf("VPN protocol '%s' requires Linux Network Namespace capabilities (CAP_NET_ADMIN). Running without NetNS would redirect entire system traffic. Run 'sudo make setcap' or run with sudo", profile.Protocol)
+		}
+		engine = s.netnsEng
+	}
+
+	// 2. Create sandbox (with fallback if engine fails, for proxy protocols only)
 	sb, err := engine.CreateSandbox(ctx, sessionID, profile)
 	if err != nil {
-		// Fallback to EnvProxyEngine if kernel restrictions block namespace creation
+		if profile.Protocol == config.ProtocolOpenVPN || profile.Protocol == config.ProtocolWireGuard {
+			return nil, fmt.Errorf("failed to create network namespace for VPN: %w", err)
+		}
+		// Fallback to EnvProxyEngine if kernel restrictions block namespace creation (proxy protocols only)
 		engine = s.envProxy
 		sb, err = engine.CreateSandbox(ctx, sessionID, profile)
 		if err != nil {

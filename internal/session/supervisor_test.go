@@ -51,3 +51,31 @@ func TestSupervisorLifecycle(t *testing.T) {
 	// Test clear stopped sessions
 	sup.ClearStoppedSessions()
 }
+
+func TestSupervisorVPNRejectionWithoutNetns(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+	t.Setenv("XDG_RUNTIME_DIR", tmpDir)
+
+	cfg := &config.Config{
+		Settings: config.Settings{
+			RootlessMode: true,
+		},
+		Profiles: []*config.Profile{
+			{
+				ID:       "ovpn-test",
+				Name:     "Test-OVPN",
+				Protocol: config.ProtocolOpenVPN,
+				OpenVPN:  &config.OpenVPNConfig{},
+			},
+		},
+	}
+
+	sup := NewSupervisor(cfg)
+
+	// Since RootlessMode is true (or unprivileged), OpenVPN should fail safely rather than executing on host
+	_, err := sup.LaunchSession(context.Background(), cfg.Profiles[0], "echo", []string{"hello"}, false)
+	if err == nil {
+		t.Fatalf("expected OpenVPN LaunchSession to fail when netns is not available, but got nil")
+	}
+}

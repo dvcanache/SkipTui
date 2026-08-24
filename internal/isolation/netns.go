@@ -140,3 +140,62 @@ func bringUpLoopback(nsName string) error {
 	}
 	return nil
 }
+
+// NamespaceExists checks if a network namespace exists on the system.
+func NamespaceExists(name string) bool {
+	if name == "" {
+		return false
+	}
+	if _, err := os.Stat("/var/run/netns/" + name); err == nil {
+		return true
+	}
+	cmd := exec.Command("ip", "netns", "list")
+	out, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+	for _, line := range osLines(string(out)) {
+		fields := osFields(line)
+		if len(fields) > 0 && fields[0] == name {
+			return true
+		}
+	}
+	return false
+}
+
+func osLines(s string) []string {
+	var lines []string
+	curr := ""
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\n' {
+			lines = append(lines, curr)
+			curr = ""
+		} else {
+			curr += string(s[i])
+		}
+	}
+	if curr != "" {
+		lines = append(lines, curr)
+	}
+	return lines
+}
+
+func osFields(s string) []string {
+	var fields []string
+	curr := ""
+	for i := 0; i < len(s); i++ {
+		if s[i] == ' ' || s[i] == '\t' || s[i] == '\r' {
+			if curr != "" {
+				fields = append(fields, curr)
+				curr = ""
+			}
+		} else {
+			curr += string(s[i])
+		}
+	}
+	if curr != "" {
+		fields = append(fields, curr)
+	}
+	return fields
+}
+

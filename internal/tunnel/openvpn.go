@@ -17,12 +17,13 @@ import (
 
 // OpenVPNTunnel manages an isolated OpenVPN client instance within the network namespace.
 type OpenVPNTunnel struct {
-	sb      *isolation.SandboxInfo
-	profile *config.Profile
-	cmd     *exec.Cmd
-	bytesRX uint64
-	bytesTX uint64
-	running bool
+	sb       *isolation.SandboxInfo
+	profile  *config.Profile
+	cmd      *exec.Cmd
+	vethInfo *isolation.VethUplinkInfo
+	bytesRX  uint64
+	bytesTX  uint64
+	running  bool
 }
 
 func NewOpenVPNTunnel(sb *isolation.SandboxInfo, profile *config.Profile) (*OpenVPNTunnel, error) {
@@ -49,24 +50,34 @@ func NewOpenVPNTunnel(sb *isolation.SandboxInfo, profile *config.Profile) (*Open
 }
 
 func (o *OpenVPNTunnel) Start(ctx context.Context) error {
+	// Refuse to run on host root namespace to protect host system traffic
+	if o.sb.IsRootless || o.sb.Namespace == "" || strings.HasPrefix(o.sb.Namespace, "env-") || strings.HasPrefix(o.sb.Namespace, "rootless-") {
+		return fmt.Errorf("OpenVPN requires Linux Network Namespace isolation (CAP_NET_ADMIN). Running on host would redirect entire system traffic. Run 'sudo make setcap' or run with sudo")
+	}
+
+	// 1. Setup VETH uplink so OpenVPN inside the namespace can reach the remote VPN server
+	vethInfo, err := isolation.SetupVethUplink(o.sb.Namespace, o.sb.ID)
+	if err != nil {
+		return fmt.Errorf("failed to setup network namespace uplink for OpenVPN: %w", err)
+	}
+	o.vethInfo = vethInfo
+
 	logDir := filepath.Join(config.GetRuntimeDir(), "logs")
 	_ = os.MkdirAll(logDir, 0700)
 	logFile := filepath.Join(logDir, fmt.Sprintf("openvpn-%s.log", o.sb.ID))
 
+	// 2. Launch OpenVPN strictly inside the network namespace with --redirect-gateway def1
+	// The gateway redirection is applied ONLY inside the namespace!
 	var args []string
-	if !o.sb.IsRootless {
-		args = append(args, "netns", "exec", o.sb.Namespace, "openvpn", "--config", o.profile.OpenVPN.ConfigPath, "--dev", "tun0", "--redirect-gateway", "def1")
-		if o.profile.OpenVPN.AuthUserPass != "" && config.FileExists(o.profile.OpenVPN.AuthUserPass) {
-			args = append(args, "--auth-user-pass", o.profile.OpenVPN.AuthUserPass)
-		}
-		o.cmd = exec.CommandContext(ctx, "ip", args...)
-	} else {
-		args = append(args, "--config", o.profile.OpenVPN.ConfigPath, "--dev", "tun0")
-		if o.profile.OpenVPN.AuthUserPass != "" && config.FileExists(o.profile.OpenVPN.AuthUserPass) {
-			args = append(args, "--auth-user-pass", o.profile.OpenVPN.AuthUserPass)
-		}
-		o.cmd = exec.CommandContext(ctx, "openvpn", args...)
+	args = append(args, "netns", "exec", o.sb.Namespace, "openvpn",
+		"--config", o.profile.OpenVPN.ConfigPath,
+		"--dev", "tun0",
+		"--redirect-gateway", "def1",
+	)
+	if o.profile.OpenVPN.AuthUserPass != "" && config.FileExists(o.profile.OpenVPN.AuthUserPass) {
+		args = append(args, "--auth-user-pass", o.profile.OpenVPN.AuthUserPass)
 	}
+	o.cmd = exec.CommandContext(ctx, "ip", args...)
 
 	o.cmd.SysProcAttr = &syscall.SysProcAttr{
 		Setpgid: true,
@@ -82,6 +93,7 @@ func (o *OpenVPNTunnel) Start(ctx context.Context) error {
 	}
 
 	if err := o.cmd.Start(); err != nil {
+		isolation.CleanupVethUplink(o.vethInfo)
 		return fmt.Errorf("failed to start openvpn process: %w", err)
 	}
 
@@ -97,6 +109,7 @@ func (o *OpenVPNTunnel) Start(ctx context.Context) error {
 
 	select {
 	case err := <-exitChan:
+		isolation.CleanupVethUplink(o.vethInfo)
 		errText := strings.TrimSpace(errBuf.String())
 		if strings.Contains(errText, "Operation not permitted") || strings.Contains(errText, "TUNSETIFF") {
 			return fmt.Errorf("OpenVPN TUN permission denied. Run 'sudo make setcap' or run with 'sudo ./bin/skiptui'")
@@ -120,6 +133,10 @@ func (o *OpenVPNTunnel) Stop() error {
 		_ = syscall.Kill(-o.cmd.Process.Pid, syscall.SIGTERM)
 		time.Sleep(200 * time.Millisecond)
 		_ = syscall.Kill(-o.cmd.Process.Pid, syscall.SIGKILL)
+	}
+	if o.vethInfo != nil {
+		isolation.CleanupVethUplink(o.vethInfo)
+		o.vethInfo = nil
 	}
 	return nil
 }

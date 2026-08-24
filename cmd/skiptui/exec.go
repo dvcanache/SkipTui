@@ -49,7 +49,7 @@ var execCmd = &cobra.Command{
 		}
 
 		var engine isolation.Engine = isolation.NewNetnsEngine()
-		if strings.HasPrefix(execSessionID, "env-") || strings.HasPrefix(nsName, "env-") || (cfg != nil && cfg.Settings.RootlessMode) || engine.CheckCapabilities() != nil {
+		if !isolation.NamespaceExists(nsName) || strings.HasPrefix(execSessionID, "env-") || strings.HasPrefix(nsName, "env-") || (cfg != nil && cfg.Settings.RootlessMode) {
 			engine = isolation.NewEnvProxyEngine()
 		}
 
