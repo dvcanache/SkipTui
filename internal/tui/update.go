@@ -41,10 +41,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.ShowExitDialog {
 			switch msg.String() {
 			case "d", "D":
-				// Detach & keep running
 				return m, tea.Quit
 			case "k", "K":
-				// Terminate all sessions
 				m.Supervisor.CleanupAll(context.Background())
 				return m, tea.Quit
 			case "esc":
@@ -62,7 +60,83 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		// 3. Handle Importer Modal
+		// 3. Handle Interactive Profile Add/Edit Form
+		if m.ShowProfileForm {
+			switch msg.String() {
+			case "esc":
+				m.ShowProfileForm = false
+				return m, nil
+			case "tab", "down":
+				m.ProfileForm.NextField()
+				return m, nil
+			case "shift+tab", "up":
+				m.ProfileForm.PrevField()
+				return m, nil
+			case "left":
+				if m.ProfileForm.FocusIdx == 1 {
+					m.ProfileForm.CycleProtocol(false)
+					return m, nil
+				}
+			case "right":
+				if m.ProfileForm.FocusIdx == 1 {
+					m.ProfileForm.CycleProtocol(true)
+					return m, nil
+				}
+			case " ":
+				if m.ProfileForm.FocusIdx == 7 {
+					m.ProfileForm.KillSwitch = !m.ProfileForm.KillSwitch
+					return m, nil
+				}
+			case "enter":
+				if m.ProfileForm.FocusIdx == 8 || m.ProfileForm.FocusIdx == 0 || m.ProfileForm.FocusIdx == 6 {
+					p := m.ProfileForm.ToProfile()
+					if err := m.Config.AddProfile(p); err != nil {
+						m.StatusMsg = fmt.Sprintf("Error saving profile: %v", err)
+					} else {
+						m.Profiles = m.Config.Profiles
+						m.Launcher.Profiles = m.Profiles
+						m.StatusMsg = fmt.Sprintf("✓ Saved profile '%s' (%s)", p.Name, p.Endpoint)
+						m.Logs = append(m.Logs, fmt.Sprintf("[%s] Configured %s profile: %s (%s)", time.Now().Format("15:04:05"), p.Protocol, p.Name, p.Endpoint))
+
+						// Trigger immediate latency test
+						targetP := p
+						cmds = append(cmds, func() tea.Msg {
+							res := netprobe.TestProfileLatency(context.Background(), targetP, 3*time.Second)
+							return LatencyResultMsg{
+								ProfileID: res.ProfileID,
+								LatencyMs: res.LatencyMs,
+								Error:     res.Error,
+							}
+						})
+					}
+					m.ShowProfileForm = false
+					return m, tea.Batch(cmds...)
+				} else {
+					m.ProfileForm.NextField()
+					return m, nil
+				}
+			default:
+				// Pass keystrokes to active input box
+				var cmd tea.Cmd
+				switch m.ProfileForm.FocusIdx {
+				case 0:
+					m.ProfileForm.NameInput, cmd = m.ProfileForm.NameInput.Update(msg)
+				case 2:
+					m.ProfileForm.HostInput, cmd = m.ProfileForm.HostInput.Update(msg)
+				case 3:
+					m.ProfileForm.PortInput, cmd = m.ProfileForm.PortInput.Update(msg)
+				case 4:
+					m.ProfileForm.UserInput, cmd = m.ProfileForm.UserInput.Update(msg)
+				case 5:
+					m.ProfileForm.PassInput, cmd = m.ProfileForm.PassInput.Update(msg)
+				case 6:
+					m.ProfileForm.DNSInput, cmd = m.ProfileForm.DNSInput.Update(msg)
+				}
+				return m, cmd
+			}
+		}
+
+		// 4. Handle Importer Modal
 		if m.ShowImporter {
 			switch msg.String() {
 			case "esc":
@@ -106,7 +180,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-		// 4. Handle Launcher Modal
+		// 5. Handle Launcher Modal
 		if m.ShowLauncher {
 			switch msg.String() {
 			case "esc":
@@ -151,7 +225,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-		// 5. Global Hotkeys & Screen Navigation
+		// 6. Global Hotkeys & Screen Navigation
 		switch msg.String() {
 		case "q", "ctrl+c":
 			if len(m.Sessions) > 0 {
@@ -212,6 +286,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 
+		case "a":
+			// Open interactive profile creation wizard
+			m.ProfileForm.Reset()
+			m.ShowProfileForm = true
+			return m, textinput.Blink
+
+		case "e":
+			// Open interactive profile edit wizard
+			if m.ActiveTab == TabProfiles && len(m.Profiles) > 0 && m.SelectedProf < len(m.Profiles) {
+				p := m.Profiles[m.SelectedProf]
+				m.ProfileForm.LoadProfile(p)
+				m.ShowProfileForm = true
+				return m, textinput.Blink
+			}
+			return m, nil
+
 		case "l":
 			// Open Launcher modal
 			m.Launcher = modals.NewLauncherModal(m.Profiles)
@@ -239,7 +329,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 			} else if m.ActiveTab == TabSessions {
-				// Quick launch terminal with selected or default profile
 				var prof *config.Profile
 				if len(m.Profiles) > 0 {
 					prof = m.Profiles[0]
@@ -257,7 +346,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case "T":
-			// Test latency on all profiles concurrently
 			m.StatusMsg = "Testing latency for all profiles..."
 			for _, prof := range m.Profiles {
 				p := prof
@@ -301,6 +389,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				p := m.Profiles[m.SelectedProf]
 				_ = m.Config.DeleteProfile(p.ID)
 				m.Profiles = m.Config.Profiles
+				m.Launcher.Profiles = m.Profiles
 				m.StatusMsg = fmt.Sprintf("Deleted profile '%s'", p.Name)
 			}
 			return m, nil
