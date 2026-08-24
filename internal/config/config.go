@@ -85,7 +85,6 @@ func LoadConfig() (*Config, error) {
 
 	configFile := filepath.Join(GetConfigDir(), "config.yaml")
 
-	// If config file does not exist, initialize with default templates
 	if _, err := os.Stat(configFile); os.IsNotExist(err) {
 		cfg := getDefaultConfig()
 		if err := saveConfigUnlocked(cfg); err != nil {
@@ -108,7 +107,6 @@ func LoadConfig() (*Config, error) {
 		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
 	}
 
-	// Ensure profiles list is initialized
 	if cfg.Profiles == nil {
 		cfg.Profiles = make([]*Profile, 0)
 	}
@@ -158,6 +156,17 @@ func (c *Config) AddProfile(p *Profile) error {
 		p.CreatedAt = time.Now()
 	}
 
+	// If OpenVPN with credentials, create the auth-user-pass credentials file
+	if p.Protocol == ProtocolOpenVPN && p.Username != "" && p.Password != "" {
+		if p.OpenVPN == nil {
+			p.OpenVPN = &OpenVPNConfig{}
+		}
+		authFilePath := filepath.Join(GetProfilesDir(), p.ID+"_auth.txt")
+		authContent := fmt.Sprintf("%s\n%s\n", p.Username, p.Password)
+		_ = os.WriteFile(authFilePath, []byte(authContent), 0600)
+		p.OpenVPN.AuthUserPass = authFilePath
+	}
+
 	for i, existing := range c.Profiles {
 		if existing.ID == p.ID || existing.Name == p.Name {
 			c.Profiles[i] = p
@@ -176,6 +185,9 @@ func (c *Config) DeleteProfile(idOrName string) error {
 	for _, p := range c.Profiles {
 		if p.ID == idOrName || p.Name == idOrName {
 			found = true
+			if p.Protocol == ProtocolOpenVPN && p.OpenVPN != nil && p.OpenVPN.AuthUserPass != "" {
+				_ = os.Remove(p.OpenVPN.AuthUserPass)
+			}
 			continue
 		}
 		newProfiles = append(newProfiles, p)
@@ -190,7 +202,7 @@ func (c *Config) DeleteProfile(idOrName string) error {
 }
 
 // ImportFile imports an .ovpn or .conf file and copies it to the profiles directory.
-func (c *Config) ImportFile(srcPath string, customName string) (*Profile, error) {
+func (c *Config) ImportFile(srcPath string, customName string, username string, password string) (*Profile, error) {
 	if err := InitDirs(); err != nil {
 		return nil, err
 	}
@@ -202,7 +214,6 @@ func (c *Config) ImportFile(srcPath string, customName string) (*Profile, error)
 	destFilename := filepath.Base(srcPath)
 	destPath := filepath.Join(GetProfilesDir(), destFilename)
 
-	// Copy file into ~/.config/skiptui/profiles/
 	if err := copyFile(srcPath, destPath); err != nil {
 		return nil, fmt.Errorf("failed to copy profile file: %w", err)
 	}
@@ -224,6 +235,12 @@ func (c *Config) ImportFile(srcPath string, customName string) (*Profile, error)
 
 	if customName != "" {
 		profile.Name = customName
+	}
+	if username != "" {
+		profile.Username = username
+	}
+	if password != "" {
+		profile.Password = password
 	}
 
 	if err := c.AddProfile(profile); err != nil {

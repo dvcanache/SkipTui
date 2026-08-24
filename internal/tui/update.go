@@ -98,7 +98,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.StatusMsg = fmt.Sprintf("✓ Saved profile '%s' (%s)", p.Name, p.Endpoint)
 						m.Logs = append(m.Logs, fmt.Sprintf("[%s] Configured %s profile: %s (%s)", time.Now().Format("15:04:05"), p.Protocol, p.Name, p.Endpoint))
 
-						// Trigger immediate latency test
 						targetP := p
 						cmds = append(cmds, func() tea.Msg {
 							res := netprobe.TestProfileLatency(context.Background(), targetP, 3*time.Second)
@@ -116,7 +115,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 			default:
-				// Pass keystrokes to active input box
 				var cmd tea.Cmd
 				switch m.ProfileForm.FocusIdx {
 				case 0:
@@ -136,45 +134,63 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-		// 4. Handle Importer Modal
+		// 4. Handle Importer Modal (with Credentials)
 		if m.ShowImporter {
 			switch msg.String() {
 			case "esc":
 				m.ShowImporter = false
 				return m, nil
-			case "tab":
-				if m.Importer.FocusIdx == 0 {
-					m.Importer.FocusIdx = 1
-					m.Importer.PathInput.Blur()
-					m.Importer.NameInput.Focus()
-				} else {
-					m.Importer.FocusIdx = 0
-					m.Importer.NameInput.Blur()
-					m.Importer.PathInput.Focus()
-				}
+			case "tab", "down":
+				m.Importer.NextField()
+				return m, nil
+			case "shift+tab", "up":
+				m.Importer.PrevField()
 				return m, nil
 			case "enter":
-				filePath := m.Importer.PathInput.Value()
-				customName := m.Importer.NameInput.Value()
-				if filePath != "" {
-					prof, err := m.Config.ImportFile(filePath, customName)
-					if err != nil {
-						m.StatusMsg = fmt.Sprintf("Import failed: %v", err)
-					} else {
-						m.Profiles = m.Config.Profiles
-						m.Launcher.Profiles = m.Profiles
-						m.StatusMsg = fmt.Sprintf("Imported profile '%s' successfully", prof.Name)
-						m.Logs = append(m.Logs, fmt.Sprintf("[%s] Imported %s profile: %s", time.Now().Format("15:04:05"), prof.Protocol, prof.Name))
+				if m.Importer.FocusIdx == 4 || m.Importer.FocusIdx == 0 {
+					filePath := m.Importer.PathInput.Value()
+					customName := m.Importer.NameInput.Value()
+					user := m.Importer.UserInput.Value()
+					pwd := m.Importer.PassInput.Value()
+
+					if filePath != "" {
+						prof, err := m.Config.ImportFile(filePath, customName, user, pwd)
+						if err != nil {
+							m.StatusMsg = fmt.Sprintf("Import failed: %v", err)
+						} else {
+							m.Profiles = m.Config.Profiles
+							m.Launcher.Profiles = m.Profiles
+							m.StatusMsg = fmt.Sprintf("✓ Imported %s profile '%s'", prof.Protocol, prof.Name)
+							m.Logs = append(m.Logs, fmt.Sprintf("[%s] Imported %s profile: %s (%s)", time.Now().Format("15:04:05"), prof.Protocol, prof.Name, prof.Endpoint))
+
+							targetP := prof
+							cmds = append(cmds, func() tea.Msg {
+								res := netprobe.TestProfileLatency(context.Background(), targetP, 3*time.Second)
+								return LatencyResultMsg{
+									ProfileID: res.ProfileID,
+									LatencyMs: res.LatencyMs,
+									Error:     res.Error,
+								}
+							})
+						}
 					}
+					m.ShowImporter = false
+					return m, tea.Batch(cmds...)
+				} else {
+					m.Importer.NextField()
+					return m, nil
 				}
-				m.ShowImporter = false
-				return m, nil
 			default:
 				var cmd tea.Cmd
-				if m.Importer.FocusIdx == 0 {
+				switch m.Importer.FocusIdx {
+				case 0:
 					m.Importer.PathInput, cmd = m.Importer.PathInput.Update(msg)
-				} else {
+				case 1:
 					m.Importer.NameInput, cmd = m.Importer.NameInput.Update(msg)
+				case 2:
+					m.Importer.UserInput, cmd = m.Importer.UserInput.Update(msg)
+				case 3:
+					m.Importer.PassInput, cmd = m.Importer.PassInput.Update(msg)
 				}
 				return m, cmd
 			}
@@ -287,13 +303,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case "a":
-			// Open interactive profile creation wizard
 			m.ProfileForm.Reset()
 			m.ShowProfileForm = true
 			return m, textinput.Blink
 
 		case "e":
-			// Open interactive profile edit wizard
 			if m.ActiveTab == TabProfiles && len(m.Profiles) > 0 && m.SelectedProf < len(m.Profiles) {
 				p := m.Profiles[m.SelectedProf]
 				m.ProfileForm.LoadProfile(p)
@@ -303,14 +317,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case "l":
-			// Open Launcher modal
 			m.Launcher = modals.NewLauncherModal(m.Profiles)
 			m.Launcher.CommandInput.Focus()
 			m.ShowLauncher = true
 			return m, textinput.Blink
 
 		case "i":
-			// Open Importer modal
 			m.Importer = modals.NewImportWizardModal()
 			m.Importer.PathInput.Focus()
 			m.ShowImporter = true

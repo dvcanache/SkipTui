@@ -122,3 +122,31 @@ func TestConfigProfileOperations(t *testing.T) {
 		t.Errorf("expected profile to be deleted")
 	}
 }
+
+func TestImportWithCredentials(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+	_ = InitDirs()
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig failed: %v", err)
+	}
+
+	ovpnFile := filepath.Join(tmpDir, "vpnbook.ovpn")
+	content := "client\ndev tun\nproto tcp\nremote uk205.vpnbook.com 443\n"
+	_ = os.WriteFile(ovpnFile, []byte(content), 0600)
+
+	prof, err := cfg.ImportFile(ovpnFile, "VPNBook-UK", "vpnbook", "pass123")
+	if err != nil {
+		t.Fatalf("ImportFile failed: %v", err)
+	}
+
+	if prof.Username != "vpnbook" {
+		t.Errorf("expected username vpnbook, got %s", prof.Username)
+	}
+
+	if prof.OpenVPN == nil || prof.OpenVPN.AuthUserPass == "" {
+		t.Errorf("expected AuthUserPass file path configured")
+	}
+}
