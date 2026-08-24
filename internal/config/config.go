@@ -1,16 +1,17 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/spf13/viper"
-	"gopkg.in/yaml.v3"
 )
 
 var (
@@ -111,6 +112,26 @@ func LoadConfig() (*Config, error) {
 		cfg.Profiles = make([]*Profile, 0)
 	}
 
+	// Auto-heal any OpenVPN profiles that might have missing ConfigPath
+	for _, p := range cfg.Profiles {
+		if p.Protocol == ProtocolOpenVPN {
+			if p.OpenVPN == nil {
+				p.OpenVPN = &OpenVPNConfig{}
+			}
+			if p.OpenVPN.ConfigPath == "" || !FileExists(p.OpenVPN.ConfigPath) {
+				disc := FindMatchingOVPN(p.Name, p.ID)
+				if disc != "" {
+					p.OpenVPN.ConfigPath = disc
+				}
+			}
+			if p.Username != "" && p.Password != "" && (p.OpenVPN.AuthUserPass == "" || !FileExists(p.OpenVPN.AuthUserPass)) {
+				authPath := filepath.Join(GetProfilesDir(), p.ID+"_auth.txt")
+				_ = os.WriteFile(authPath, []byte(fmt.Sprintf("%s\n%s\n", p.Username, p.Password)), 0600)
+				p.OpenVPN.AuthUserPass = authPath
+			}
+		}
+	}
+
 	globalConfig = &cfg
 	return &cfg, nil
 }
@@ -124,7 +145,7 @@ func SaveConfig(cfg *Config) error {
 
 func saveConfigUnlocked(cfg *Config) error {
 	configFile := filepath.Join(GetConfigDir(), "config.yaml")
-	data, err := yaml.Marshal(cfg)
+	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to encode config: %w", err)
 	}
@@ -156,19 +177,57 @@ func (c *Config) AddProfile(p *Profile) error {
 		p.CreatedAt = time.Now()
 	}
 
-	// If OpenVPN with credentials, create the auth-user-pass credentials file
-	if p.Protocol == ProtocolOpenVPN && p.Username != "" && p.Password != "" {
+	// If OpenVPN, ensure ConfigPath is valid or discover/generate it
+	if p.Protocol == ProtocolOpenVPN {
 		if p.OpenVPN == nil {
 			p.OpenVPN = &OpenVPNConfig{}
 		}
-		authFilePath := filepath.Join(GetProfilesDir(), p.ID+"_auth.txt")
-		authContent := fmt.Sprintf("%s\n%s\n", p.Username, p.Password)
-		_ = os.WriteFile(authFilePath, []byte(authContent), 0600)
-		p.OpenVPN.AuthUserPass = authFilePath
+
+		if p.OpenVPN.ConfigPath == "" || !FileExists(p.OpenVPN.ConfigPath) {
+			disc := FindMatchingOVPN(p.Name, p.ID)
+			if disc != "" {
+				p.OpenVPN.ConfigPath = disc
+			} else {
+				// Generate fallback .ovpn configuration
+				genPath := filepath.Join(GetProfilesDir(), p.ID+".ovpn")
+				host := "127.0.0.1"
+				port := "1194"
+				proto := "udp"
+				if p.Endpoint != "" {
+					parts := strings.Split(p.Endpoint, ":")
+					if len(parts) >= 1 {
+						host = parts[0]
+					}
+					if len(parts) >= 2 {
+						port = parts[1]
+					}
+				}
+				if p.OpenVPN.Proto != "" {
+					proto = p.OpenVPN.Proto
+				}
+				content := fmt.Sprintf("client\ndev tun\nproto %s\nremote %s %s\nresolv-retry infinite\nnobind\npersist-key\npersist-tun\nverb 3\n", proto, host, port)
+				_ = os.WriteFile(genPath, []byte(content), 0600)
+				p.OpenVPN.ConfigPath = genPath
+			}
+		}
+
+		if p.Username != "" && p.Password != "" {
+			authFilePath := filepath.Join(GetProfilesDir(), p.ID+"_auth.txt")
+			authContent := fmt.Sprintf("%s\n%s\n", p.Username, p.Password)
+			_ = os.WriteFile(authFilePath, []byte(authContent), 0600)
+			p.OpenVPN.AuthUserPass = authFilePath
+		}
 	}
 
 	for i, existing := range c.Profiles {
 		if existing.ID == p.ID || existing.Name == p.Name {
+			// Preserve sub-structs if not set in new p
+			if p.OpenVPN == nil && existing.OpenVPN != nil {
+				p.OpenVPN = existing.OpenVPN
+			}
+			if p.WireGuard == nil && existing.WireGuard != nil {
+				p.WireGuard = existing.WireGuard
+			}
 			c.Profiles[i] = p
 			return SaveConfig(c)
 		}
@@ -248,6 +307,58 @@ func (c *Config) ImportFile(srcPath string, customName string, username string, 
 	}
 
 	return profile, nil
+}
+
+// FileExists checks if a file path exists and is not empty.
+func FileExists(path string) bool {
+	if path == "" {
+		return false
+	}
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
+}
+
+// FindMatchingOVPN searches the profiles directory for an .ovpn file matching a profile name or ID.
+func FindMatchingOVPN(name, id string) string {
+	profDir := GetProfilesDir()
+	entries, err := os.ReadDir(profDir)
+	if err != nil {
+		return ""
+	}
+
+	cleanName := strings.ToLower(strings.ReplaceAll(name, "-", ""))
+
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".ovpn") {
+			continue
+		}
+
+		fullPath := filepath.Join(profDir, entry.Name())
+		entryClean := strings.ToLower(strings.ReplaceAll(entry.Name(), "-", ""))
+
+		// Exact ID match
+		if entry.Name() == id+".ovpn" {
+			return fullPath
+		}
+
+		// Substring or prefix match
+		if strings.Contains(entryClean, cleanName) || strings.Contains(cleanName, strings.TrimSuffix(entryClean, ".ovpn")) {
+			return fullPath
+		}
+	}
+
+	// If only one .ovpn file exists in the directory, return it as fallback
+	var allOVPN []string
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".ovpn") {
+			allOVPN = append(allOVPN, filepath.Join(profDir, entry.Name()))
+		}
+	}
+	if len(allOVPN) == 1 {
+		return allOVPN[0]
+	}
+
+	return ""
 }
 
 func stringsToLowerExt(path string) string {

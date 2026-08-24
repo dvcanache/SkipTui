@@ -13,19 +13,21 @@ import (
 
 // ProfileFormModal manages the interactive creation and editing of proxy/VPN profiles.
 type ProfileFormModal struct {
-	NameInput     textinput.Model
-	HostInput     textinput.Model
-	PortInput     textinput.Model
-	UserInput     textinput.Model
-	PassInput     textinput.Model
-	DNSInput      textinput.Model
-	Protocols     []config.ProtocolType
-	SelectedProto int
-	KillSwitch    bool
-	FocusIdx      int // 0: Name, 1: Proto, 2: Host, 3: Port, 4: User, 5: Pass, 6: DNS, 7: KillSwitch, 8: Save
-	Active        bool
-	IsEditing     bool
-	EditingID     string
+	NameInput       textinput.Model
+	HostInput       textinput.Model
+	PortInput       textinput.Model
+	UserInput       textinput.Model
+	PassInput       textinput.Model
+	DNSInput        textinput.Model
+	Protocols       []config.ProtocolType
+	SelectedProto   int
+	KillSwitch      bool
+	FocusIdx        int // 0: Name, 1: Proto, 2: Host, 3: Port, 4: User, 5: Pass, 6: DNS, 7: KillSwitch, 8: Save
+	Active          bool
+	IsEditing       bool
+	EditingID       string
+	ExistingOpenVPN *config.OpenVPNConfig
+	ExistingWG      *config.WGConfig
 }
 
 func NewProfileFormModal() ProfileFormModal {
@@ -82,6 +84,8 @@ func NewProfileFormModal() ProfileFormModal {
 func (m *ProfileFormModal) LoadProfile(p *config.Profile) {
 	m.IsEditing = true
 	m.EditingID = p.ID
+	m.ExistingOpenVPN = p.OpenVPN
+	m.ExistingWG = p.WireGuard
 	m.NameInput.SetValue(p.Name)
 
 	endpointParts := strings.Split(p.Endpoint, ":")
@@ -116,6 +120,8 @@ func (m *ProfileFormModal) LoadProfile(p *config.Profile) {
 func (m *ProfileFormModal) Reset() {
 	m.IsEditing = false
 	m.EditingID = ""
+	m.ExistingOpenVPN = nil
+	m.ExistingWG = nil
 	m.NameInput.SetValue("")
 	m.HostInput.SetValue("")
 	m.PortInput.SetValue("1080")
@@ -180,7 +186,6 @@ func (m *ProfileFormModal) CycleProtocol(forward bool) {
 		}
 	}
 
-	// Auto adjust default port if user hasn't typed custom port
 	if m.PortInput.Value() == "" || m.PortInput.Value() == "1080" || m.PortInput.Value() == "8080" || m.PortInput.Value() == "1194" || m.PortInput.Value() == "51820" {
 		switch m.Protocols[m.SelectedProto] {
 		case config.ProtocolSOCKS5:
@@ -195,7 +200,7 @@ func (m *ProfileFormModal) CycleProtocol(forward bool) {
 	}
 }
 
-// ToProfile builds a config.Profile from the form inputs.
+// ToProfile builds a config.Profile from the form inputs, preserving existing configurations.
 func (m *ProfileFormModal) ToProfile() *config.Profile {
 	name := strings.TrimSpace(m.NameInput.Value())
 	if name == "" {
@@ -233,6 +238,8 @@ func (m *ProfileFormModal) ToProfile() *config.Profile {
 		Password:   strings.TrimSpace(m.PassInput.Value()),
 		DNS:        dns,
 		KillSwitch: m.KillSwitch,
+		WireGuard:  m.ExistingWG,
+		OpenVPN:    m.ExistingOpenVPN,
 		CreatedAt:  time.Now(),
 	}
 }
@@ -251,7 +258,6 @@ func (m *ProfileFormModal) Render(width int) string {
 	}
 	title := styles.TitleStyle.Render(titleText)
 
-	// Protocol Selector
 	var protoPills []string
 	for i, proto := range m.Protocols {
 		pStr := string(proto)
