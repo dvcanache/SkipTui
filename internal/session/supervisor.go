@@ -35,6 +35,7 @@ type Supervisor struct {
 	cfg      *config.Config
 	netnsEng *isolation.NetnsEngine
 	rootless *isolation.RootlessEngine
+	envProxy *isolation.EnvProxyEngine
 }
 
 func NewSupervisor(cfg *config.Config) *Supervisor {
@@ -43,7 +44,19 @@ func NewSupervisor(cfg *config.Config) *Supervisor {
 		cfg:      cfg,
 		netnsEng: isolation.NewNetnsEngine(),
 		rootless: isolation.NewRootlessEngine(),
+		envProxy: isolation.NewEnvProxyEngine(),
 	}
+}
+
+// SelectBestEngine picks the highest-privilege working isolation engine available.
+func (s *Supervisor) SelectBestEngine() isolation.Engine {
+	if !s.cfg.Settings.RootlessMode && s.netnsEng.CheckCapabilities() == nil {
+		return s.netnsEng
+	}
+	if s.rootless.CheckCapabilities() == nil {
+		return s.rootless
+	}
+	return s.envProxy
 }
 
 // LaunchSession starts an isolated sandbox, connects the proxy/VPN tunnel, and runs the target command.
@@ -53,16 +66,18 @@ func (s *Supervisor) LaunchSession(ctx context.Context, profile *config.Profile,
 
 	sessionID := "sb-" + uuid.New().String()[:8]
 
-	// 1. Choose isolation engine (privileged NetNS vs rootless)
-	var engine isolation.Engine = s.netnsEng
-	if s.cfg.Settings.RootlessMode || s.netnsEng.CheckCapabilities() != nil {
-		engine = s.rootless
-	}
+	// 1. Choose best working isolation engine
+	engine := s.SelectBestEngine()
 
-	// 2. Create sandbox
+	// 2. Create sandbox (with fallback if engine fails)
 	sb, err := engine.CreateSandbox(ctx, sessionID, profile)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create sandbox: %w", err)
+		// Fallback to EnvProxyEngine if kernel restrictions block namespace creation
+		engine = s.envProxy
+		sb, err = engine.CreateSandbox(ctx, sessionID, profile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create sandbox: %w", err)
+		}
 	}
 
 	// 3. Initialize tunnel adapter
@@ -120,7 +135,13 @@ func (s *Supervisor) LaunchSession(ctx context.Context, profile *config.Profile,
 		}
 	} else {
 		// Spawn background process
-		cmd, err := engine.BuildCommand(sessionCtx, sb, targetCmd, args...)
+		var cmd *exec.Cmd
+		if envEng, ok := engine.(*isolation.EnvProxyEngine); ok {
+			cmd, err = envEng.BuildCommandWithProfile(sessionCtx, sb, profile, targetCmd, args...)
+		} else {
+			cmd, err = engine.BuildCommand(sessionCtx, sb, targetCmd, args...)
+		}
+
 		if err != nil {
 			_ = tunWorker.Stop()
 			_ = engine.DestroySandbox(ctx, sb)

@@ -64,16 +64,13 @@ var runCmd = &cobra.Command{
 			return nil
 		}
 
-		// Run inline with direct stdio attachment
-		var engine isolation.Engine = isolation.NewNetnsEngine()
-		if cfg.Settings.RootlessMode || engine.CheckCapabilities() != nil {
-			engine = isolation.NewRootlessEngine()
-		}
+		// Pick isolation engine
+		engine := sup.SelectBestEngine()
 
 		sb, err := engine.CreateSandbox(context.Background(), "cli-exec", profile)
 		if err != nil {
-			// Fallback to rootless if netns fails
-			engine = isolation.NewRootlessEngine()
+			// Fallback to EnvProxyEngine
+			engine = isolation.NewEnvProxyEngine()
 			sb, err = engine.CreateSandbox(context.Background(), "cli-exec", profile)
 			if err != nil {
 				return fmt.Errorf("failed to create sandbox: %w", err)
@@ -83,7 +80,13 @@ var runCmd = &cobra.Command{
 			_ = engine.DestroySandbox(context.Background(), sb)
 		}()
 
-		execCmd, err := engine.BuildCommand(context.Background(), sb, targetCmd, targetArgs...)
+		var execCmd *exec.Cmd
+		if envEng, ok := engine.(*isolation.EnvProxyEngine); ok {
+			execCmd, err = envEng.BuildCommandWithProfile(context.Background(), sb, profile, targetCmd, targetArgs...)
+		} else {
+			execCmd, err = engine.BuildCommand(context.Background(), sb, targetCmd, targetArgs...)
+		}
+
 		if err != nil {
 			return fmt.Errorf("failed to build command: %w", err)
 		}

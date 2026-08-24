@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"fmt"
 	"skiptui/internal/tui/modals"
 	"skiptui/internal/tui/styles"
 	"skiptui/internal/tui/views"
@@ -59,14 +58,22 @@ func (m Model) View() string {
 		body = views.RenderSettings(m.Config, m.Width)
 	}
 
-	// 4. Bottom Status & Hotkey Bar
-	status := ""
+	// 4. Status Notification Bar
+	var statusBar string
 	if m.StatusMsg != "" {
-		status = lipgloss.NewStyle().Foreground(styles.ColorWarning).Render(" " + m.StatusMsg + " |")
+		truncatedMsg := m.StatusMsg
+		if len(truncatedMsg) > m.Width-10 {
+			truncatedMsg = truncatedMsg[:m.Width-13] + "..."
+		}
+		statusBar = lipgloss.NewStyle().
+			Foreground(styles.ColorWarning).
+			Bold(true).
+			Render(" " + styles.IconBolt + " " + truncatedMsg)
 	}
 
+	// 5. Bottom Hotkeys Bar
 	hotkeys := lipgloss.NewStyle().Foreground(styles.ColorMuted).Render(
-		fmt.Sprintf("%s [l] Launch  [t] Terminal  [i] Import  [k/x] Kill  [?] Help  [q] Quit", status),
+		" [l] Launch  [t] Terminal  [i] Import  [k/x] Kill  [?] Help  [q] Quit",
 	)
 
 	return lipgloss.JoinVertical(
@@ -75,6 +82,7 @@ func (m Model) View() string {
 		"",
 		body,
 		"",
+		statusBar,
 		hotkeys,
 	)
 }

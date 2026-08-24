@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"skiptui/internal/config"
 	"skiptui/internal/isolation"
+	"strings"
 	"syscall"
 
 	"github.com/spf13/cobra"
@@ -25,10 +26,11 @@ var execCmd = &cobra.Command{
 		targetCmd := args[0]
 		targetArgs := args[1:]
 
-		var engine isolation.Engine = isolation.NewNetnsEngine()
 		cfg, _ := config.LoadConfig()
-		if cfg != nil && cfg.Settings.RootlessMode {
-			engine = isolation.NewRootlessEngine()
+
+		var engine isolation.Engine = isolation.NewNetnsEngine()
+		if strings.HasPrefix(execSessionID, "env-") || (cfg != nil && cfg.Settings.RootlessMode) || engine.CheckCapabilities() != nil {
+			engine = isolation.NewEnvProxyEngine()
 		}
 
 		sb := &isolation.SandboxInfo{
@@ -36,7 +38,19 @@ var execCmd = &cobra.Command{
 			Namespace: "skiptui-" + execSessionID,
 		}
 
-		childCmd, err := engine.BuildCommand(context.Background(), sb, targetCmd, targetArgs...)
+		var childCmd *exec.Cmd
+		var err error
+
+		if envEng, ok := engine.(*isolation.EnvProxyEngine); ok {
+			var prof *config.Profile
+			if cfg != nil && len(cfg.Profiles) > 0 {
+				prof = cfg.Profiles[0]
+			}
+			childCmd, err = envEng.BuildCommandWithProfile(context.Background(), sb, prof, targetCmd, targetArgs...)
+		} else {
+			childCmd, err = engine.BuildCommand(context.Background(), sb, targetCmd, targetArgs...)
+		}
+
 		if err != nil {
 			return fmt.Errorf("failed to build command: %w", err)
 		}
