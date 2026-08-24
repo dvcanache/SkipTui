@@ -2,28 +2,36 @@
 
 ## 1. Privilege & Capabilities Model
 
-Configuring Linux network interfaces and namespaces natively requires administrative capabilities. SkipTUI is designed to minimize privilege escalation and supports three tiers of operation.
+Configuring Linux network interfaces, namespaces, and OpenVPN/WireGuard TUN devices natively requires administrative capabilities. SkipTUI is designed to minimize privilege escalation and supports three tiers of operation.
 
 ```
 +--------------------------------------------------------------------------------+
 |                             PRIVILEGE TIERS                                    |
 +--------------------------+---------------------------+-------------------------+
-| Tier 1: User Namespaces  | Tier 2: File Capabilities | Tier 3: Sudo / Polkit   |
-| (Zero Privileges)        | (`setcap CAP_NET_ADMIN`)  | (Traditional Elevated)  |
+| Tier 1: Linux Caps       | Tier 2: Sudo / Elevated   | Tier 3: Universal Fallback
+| (`sudo make setcap`)     | (`sudo ./bin/skiptui`)    | (EnvProxy Engine)       |
 +--------------------------+---------------------------+-------------------------+
-| - No root / no sudo      | - Binary granted          | - Uses `sudo` helper or |
-| - Runs via `unshare -U`  |   `cap_net_admin+ep`      |   polkit action policy  |
-| - Uses `slirp4netns`     | - Fast native `netns`     | - Full system namespace |
-|   or user-space netstack |   without full root       |   orchestration         |
+| - Binary granted         | - Runs with sudo          | - 100% unprivileged     |
+|   `cap_net_admin,`       | - Full system namespace   | - Environment proxy     |
+|   `cap_sys_admin+ep`     |   orchestration           |   routing for SOCKS/HTTP|
+| - `openvpn` granted      |                           |   (no TUN device needed)|
+|   `cap_net_admin+ep`     |                           |                         |
+| - Fast native `netns`    |                           |                         |
+|   without full root      |                           |                         |
 +--------------------------+---------------------------+-------------------------+
 ```
 
 ### 1.1 Recommended Setup: Linux Capabilities
-Instead of running SkipTUI entirely as root, users can grant network admin capabilities to the binary or a dedicated helper:
+Instead of running SkipTUI entirely as root, users grant network admin capabilities to the binary and OpenVPN helper:
+```bash
+sudo make setcap
+```
+This executes:
 ```bash
 sudo setcap 'cap_net_admin,cap_sys_admin+ep' ./bin/skiptui
+sudo setcap 'cap_net_admin+ep' /usr/sbin/openvpn
 ```
-This enables SkipTUI to create network namespaces, manage TUN devices, and set isolated routing tables without granting full unrestricted root filesystem access.
+This enables SkipTUI and OpenVPN to create network namespaces, allocate TUN devices (`ioctl TUNSETIFF`), and set isolated routing tables without granting full unrestricted root filesystem access.
 
 ---
 
@@ -42,11 +50,11 @@ This enables SkipTUI to create network namespaces, manage TUN devices, and set i
 
 ## 3. Credential & Key Security
 
-SkipTUI manages sensitive credentials including WireGuard Private Keys, Shadowsocks passwords, and HTTP/SOCKS5 Basic Auth credentials.
+SkipTUI manages sensitive credentials including WireGuard Private Keys, Shadowsocks passwords, and HTTP/SOCKS5/OpenVPN credentials.
 
 ### 3.1 Storage Security Principles
-1. **Strict File Permissions**: All configuration files (`~/.config/skiptui/profiles.json` or `config.yaml`) are created with `0600` permissions (read/write only by the current user).
-2. **System Keyring Integration (Optional)**: Support for FreeDesktop Secret Service API / GNOME Keyring / KWallet via `zalando/go-keyring` for storing passwords securely.
+1. **Strict File Permissions**: All configuration files (`~/.config/skiptui/config.yaml` and `~/.config/skiptui/profiles/*_auth.txt`) are created with `0600` permissions (read/write only by the current user).
+2. **Auto-Linked Auth Files**: OpenVPN `auth-user-pass` credentials are automatically created and bound to the corresponding `.ovpn` file.
 3. **Environment Variable Injection**: Credentials can be referenced via environment variables (e.g. `SOCKS5_PASSWORD_ENV`) rather than stored in plain text.
 4. **Memory Zeroing**: Sensitive keys in memory are scrubbed when profiles are unloaded.
 
@@ -57,15 +65,6 @@ SkipTUI manages sensitive credentials including WireGuard Private Keys, Shadowso
 Abrupt exits (e.g. `SIGINT`, terminal window closure, crash) could leave orphan network namespaces or stale virtual interfaces in the kernel.
 
 ### 4.1 Lifecycle Guarantees
-1. **Signal Trapping**: SkipTUI registers handlers for `SIGINT`, `SIGTERM`, `SIGHUP`, and `SIGQUIT`:
-   ```go
-   sigChan := make(chan os.Signal, 1)
-   signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
-   go func() {
-       <-sigChan
-       sessionManager.CleanupAll(context.Background())
-       os.Exit(0)
-   }()
-   ```
+1. **Signal Trapping**: SkipTUI registers handlers for `SIGINT`, `SIGTERM`, `SIGHUP`, and `SIGQUIT`.
 2. **Namespace Tagging**: All namespaces created by SkipTUI follow the naming pattern: `skiptui-<timestamp>-<random_id>`.
 3. **Startup Orphan Sweeper**: On launch, SkipTUI scans for any lingering `skiptui-*` namespaces that do not correspond to active PIDs and destroys them safely.

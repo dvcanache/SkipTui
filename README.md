@@ -27,11 +27,11 @@ Meanwhile, tools like `proxychains` rely on dynamic linker hooking (`LD_PRELOAD`
 ## ✨ Features
 
 - 🖥️ **Interactive Terminal UI**: Keyboard-driven dashboard built with [Bubble Tea](https://github.com/charmbracelet/bubbletea) and [Lip Gloss](https://github.com/charmbracelet/lipgloss).
-- ⚡ **Quick Terminal Spawner (`[t]`)**: Interactive menu to choose any VPN/Proxy profile and spawn an isolated shell in a new window (Kitty, Alacritty, WezTerm, Ghostty, Foot, Tmux).
+- ⚡ **Quick Terminal Spawner (`[t]`)**: Interactive menu to select any VPN/Proxy profile and spawn an isolated shell in a new window (Kitty, Alacritty, WezTerm, Ghostty, Foot, Tmux).
 - 📝 **In-App Profile Form (`[a]` / `[e]`)**: Configure IP, Port, Credentials, Protocol, and DNS directly from the TUI.
 - 🌐 **Multi-Protocol Support**:
   - **SOCKS5 / SOCKS5h** (with username/password & remote DNS)
-  - **OpenVPN (`.ovpn`)** (native import with inline certificates & `auth-user-pass`)
+  - **OpenVPN (`.ovpn`)** (native import with inline certificates, auto-discovered paths & secure credentials)
   - **WireGuard (`.conf`)** (native interface migration & allowed IPs)
   - **HTTP / HTTPS Forward Proxy**
   - **Shadowsocks**
@@ -53,7 +53,7 @@ Meanwhile, tools like `proxychains` rely on dynamic linker hooking (`LD_PRELOAD`
 │  ID          NAME / CMD              PROFILE        PID     UPTIME    RX/TX     STATUS│
 │  ● sb-90a1   firefox                 US-Residential 48102   00:14:22  14.2 MB   ● RUN │
 │  ● sb-33fc   zsh (Kitty Terminal)    NL-WireGuard   48291   00:08:11   2.1 MB   ● RUN │
-│  ● sb-77ab   openvpn (Corp-VPN)      Work-OpenVPN   48550   00:04:30  35.8 MB   ● RUN │
+│  ● sb-77ab   openvpn (VPNBook)       VPNBook-UK     48550   00:04:30  35.8 MB   ● RUN │
 │                                                                                       │
 ├───────────────────────────────────────────────────────────────────────────────────────┤
 │ [t] Spawn Terminal  [a] Add Profile  [e] Edit  [l] Launch App  [i] Import  [q] Quit   │
@@ -77,43 +77,43 @@ Meanwhile, tools like `proxychains` rely on dynamic linker hooking (`LD_PRELOAD`
 
 ---
 
-## 🚀 Installation & Build
+## 🚀 Installation & Permissions Setup
 
 ### Prerequisites
 - Linux Kernel `>= 5.4`
 - Go `1.22+`
-- (Optional) `openvpn` package for `.ovpn` profiles
+- (Optional) `openvpn` package for `.ovpn` profiles (`sudo apt install openvpn`)
 
-### Build from Source
+### Build & Setup (One-Step)
 ```bash
-# Clone repository
+# 1. Clone repository
 git clone https://github.com/dvcanache/SkipTui.git
 cd SkipTui
 
-# Build binary
+# 2. Build binary
 make build
 
-# (Recommended) Grant Linux capabilities once for native NetNS performance:
+# 3. Grant Linux network capabilities (REQUIRED for OpenVPN & WireGuard TUN devices without sudo):
 sudo make setcap
 
-# Run SkipTUI
+# 4. Run SkipTUI
 ./bin/skiptui
 ```
+
+> 💡 **Why `sudo make setcap`?**
+> Creating virtual TUN network devices (`ioctl TUNSETIFF`) and managing network namespaces requires Linux `CAP_NET_ADMIN`. Running `sudo make setcap` grants this capability to `./bin/skiptui` and `/usr/sbin/openvpn` once, so you can run all VPN and proxy sandboxes seamlessly **as a normal user without ever needing `sudo`**.
 
 ---
 
 ## 📖 Usage Guide
 
-### 1. Interactive TUI
-```bash
-skiptui
-```
+### 1. Interactive TUI Shortcuts
 
 | Key | Action |
 | :--- | :--- |
-| **`t`** | **Quick-spawn isolated terminal shell** (Opens profile selector) |
-| **`a`** | **Add new proxy/VPN profile** (Interactive form) |
-| **`e`** | **Edit selected profile** |
+| **`t`** | **Quick-spawn isolated terminal shell** (Opens profile selector menu) |
+| **`a`** | **Add new proxy/VPN profile** (Interactive in-app form) |
+| **`e`** | **Edit selected profile** (Preserves certs, keys, and paths) |
 | **`i`** | **Import `.ovpn` or WireGuard `.conf`** with credentials |
 | **`l`** | **Launch custom app / binary** in isolated sandbox |
 | **`p` / `T`** | **Test latency** on selected or all profiles |
@@ -126,7 +126,7 @@ skiptui
 ### 2. Command-Line Interface (CLI)
 
 ```bash
-# 1. Spawn an isolated terminal in a new Kitty/Alacritty window
+# 1. Spawn an isolated terminal in a new Kitty/Alacritty/Tmux window
 skiptui run --profile VPNBook-UK --terminal -- zsh
 
 # 2. Run a command inside an isolated proxy sandbox
@@ -135,8 +135,8 @@ skiptui run --profile US-Residential -- curl -s https://api.ipify.org
 # 3. Launch an isolated browser instance
 skiptui run --profile Tor-Network -- firefox --new-instance -P "tor-session"
 
-# 4. Import OpenVPN (.ovpn) with credentials
-skiptui import ~/Downloads/vpn.ovpn --name "My-VPN" -u "username" -p "password"
+# 4. Import OpenVPN (.ovpn) with username & password
+skiptui import ~/Downloads/vpnbook-uk205-tcp443.ovpn --name "VPNBook-UK" -u "vpnbook" -p "password"
 
 # 5. Import WireGuard (.conf)
 skiptui import ~/Downloads/wg0.conf --name "Mullvad-WG"
@@ -147,6 +147,18 @@ skiptui test
 # 7. List active sessions & profiles
 skiptui list
 ```
+
+---
+
+## 🔧 Troubleshooting
+
+### "Cannot ioctl TUNSETIFF tun1: Operation not permitted"
+- **Cause**: Linux kernel restricted creating the virtual TUN device because `openvpn` lacks `CAP_NET_ADMIN`.
+- **Solution**: Run `sudo make setcap` (or run with `sudo ./bin/skiptui`).
+
+### "openvpn configuration path is missing"
+- **Cause**: Profile was created without a `.ovpn` file.
+- **Solution**: SkipTUI auto-discovers matching `.ovpn` files in `~/.config/skiptui/profiles/` or auto-generates a client configuration. Make sure your `.ovpn` file is imported via `[i]` or CLI.
 
 ---
 
