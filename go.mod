@@ -11,6 +11,7 @@ require (
 	github.com/spf13/viper v1.21.0
 	github.com/vishvananda/netlink v1.3.1
 	github.com/vishvananda/netns v0.0.5
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (

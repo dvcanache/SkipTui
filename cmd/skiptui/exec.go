@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"skiptui/internal/config"
+	"skiptui/internal/daemon"
 	"skiptui/internal/isolation"
 	"strings"
 	"syscall"
@@ -28,24 +29,39 @@ var execCmd = &cobra.Command{
 
 		cfg, _ := config.LoadConfig()
 
+		// Retrieve session info to identify the correct profile and namespace
+		var prof *config.Profile
+		nsName := "skiptui-" + execSessionID
+		if sessInfo, err := daemon.GetSessionByID(execSessionID); err == nil && sessInfo != nil {
+			if sessInfo.Namespace != "" {
+				nsName = sessInfo.Namespace
+			}
+			if cfg != nil {
+				prof = cfg.GetProfile(sessInfo.ProfileID)
+				if prof == nil {
+					prof = cfg.GetProfile(sessInfo.ProfileName)
+				}
+			}
+		}
+
+		if prof == nil && cfg != nil && len(cfg.Profiles) > 0 {
+			prof = cfg.Profiles[0]
+		}
+
 		var engine isolation.Engine = isolation.NewNetnsEngine()
-		if strings.HasPrefix(execSessionID, "env-") || (cfg != nil && cfg.Settings.RootlessMode) || engine.CheckCapabilities() != nil {
+		if strings.HasPrefix(execSessionID, "env-") || strings.HasPrefix(nsName, "env-") || (cfg != nil && cfg.Settings.RootlessMode) || engine.CheckCapabilities() != nil {
 			engine = isolation.NewEnvProxyEngine()
 		}
 
 		sb := &isolation.SandboxInfo{
 			ID:        execSessionID,
-			Namespace: "skiptui-" + execSessionID,
+			Namespace: nsName,
 		}
 
 		var childCmd *exec.Cmd
 		var err error
 
 		if envEng, ok := engine.(*isolation.EnvProxyEngine); ok {
-			var prof *config.Profile
-			if cfg != nil && len(cfg.Profiles) > 0 {
-				prof = cfg.Profiles[0]
-			}
 			childCmd, err = envEng.BuildCommandWithProfile(context.Background(), sb, prof, targetCmd, targetArgs...)
 		} else {
 			childCmd, err = engine.BuildCommand(context.Background(), sb, targetCmd, targetArgs...)
@@ -76,3 +92,4 @@ func init() {
 	execCmd.Flags().StringVar(&execSessionID, "session", "", "session ID")
 	rootCmd.AddCommand(execCmd)
 }
+

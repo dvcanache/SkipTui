@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"skiptui/internal/config"
+	"skiptui/internal/daemon"
 	"skiptui/internal/isolation"
 	"skiptui/internal/terminal"
 	"skiptui/internal/tunnel"
@@ -19,13 +20,13 @@ import (
 
 // ActiveSession wraps the runtime process, sandbox, and tunnel worker for a session.
 type ActiveSession struct {
-	Info     *config.SessionInfo
-	Sandbox  *isolation.SandboxInfo
-	Tunnel   tunnel.TunnelInstance
-	Cmd      *exec.Cmd
-	Cancel   context.CancelFunc
-	Engine   isolation.Engine
-	mu       sync.RWMutex
+	Info    *config.SessionInfo
+	Sandbox *isolation.SandboxInfo
+	Tunnel  tunnel.TunnelInstance
+	Cmd     *exec.Cmd
+	Cancel  context.CancelFunc
+	Engine  isolation.Engine
+	mu      sync.RWMutex
 }
 
 // Supervisor coordinates active sandboxed sessions and lifecycles.
@@ -39,13 +40,29 @@ type Supervisor struct {
 }
 
 func NewSupervisor(cfg *config.Config) *Supervisor {
-	return &Supervisor{
+	sup := &Supervisor{
 		sessions: make(map[string]*ActiveSession),
 		cfg:      cfg,
 		netnsEng: isolation.NewNetnsEngine(),
 		rootless: isolation.NewRootlessEngine(),
 		envProxy: isolation.NewEnvProxyEngine(),
 	}
+
+	// Restore sessions from disk state
+	if saved, err := daemon.LoadSessionState(); err == nil {
+		for _, s := range saved {
+			// Validate process liveness
+			if s.Status == "running" && s.PID > 0 && !daemon.IsPIDAlive(s.PID) {
+				s.Status = "stopped"
+			}
+			sup.sessions[s.ID] = &ActiveSession{
+				Info: s,
+			}
+		}
+		_ = daemon.SaveSessionState(saved)
+	}
+
+	return sup
 }
 
 // SelectBestEngine picks the highest-privilege working isolation engine available.
@@ -149,6 +166,11 @@ func (s *Supervisor) LaunchSession(ctx context.Context, profile *config.Profile,
 			return nil, fmt.Errorf("failed to build command: %w", err)
 		}
 
+		// Ensure child process is group leader for clean signal dispatch
+		cmd.SysProcAttr = &syscall.SysProcAttr{
+			Setpgid: true,
+		}
+
 		// Direct log output
 		if logHandle, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600); err == nil {
 			cmd.Stdout = logHandle
@@ -171,30 +193,55 @@ func (s *Supervisor) LaunchSession(ctx context.Context, profile *config.Profile,
 			active.mu.Lock()
 			info.Status = "stopped"
 			active.mu.Unlock()
+			_ = daemon.UpdateSession(info)
 		}()
 	}
 
 	s.sessions[sessionID] = active
+	_ = daemon.SaveSessionState(s.collectSessionInfoUnlocked())
+
 	return info, nil
 }
 
-// ListSessions returns a slice of all tracked sessions with up-to-date metrics.
+// ListSessions returns a slice of all tracked sessions with up-to-date metrics and liveness.
 func (s *Supervisor) ListSessions() []*config.SessionInfo {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	var list []*config.SessionInfo
 	for _, sess := range s.sessions {
-		sess.mu.RLock()
+		sess.mu.Lock()
+		if sess.Info.Status == "running" && sess.Info.PID > 0 && !daemon.IsPIDAlive(sess.Info.PID) {
+			sess.Info.Status = "stopped"
+		}
 		if sess.Tunnel != nil {
 			rx, tx := sess.Tunnel.GetMetrics()
 			sess.Info.BytesRX = rx
 			sess.Info.BytesTX = tx
 		}
 		list = append(list, sess.Info)
-		sess.mu.RUnlock()
+		sess.mu.Unlock()
 	}
+
+	_ = daemon.SaveSessionState(list)
 	return list
+}
+
+// ClearStoppedSessions removes inactive/stopped sessions from tracking.
+func (s *Supervisor) ClearStoppedSessions() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for id, sess := range s.sessions {
+		if sess.Info.Status == "stopped" || sess.Info.Status == "failed" {
+			if sess.Engine != nil && sess.Sandbox != nil {
+				_ = sess.Engine.DestroySandbox(context.Background(), sess.Sandbox)
+			}
+			delete(s.sessions, id)
+			_ = daemon.RemoveSession(id)
+		}
+	}
+	_ = daemon.SaveSessionState(s.collectSessionInfoUnlocked())
 }
 
 // KillSession terminates a running session and releases resources.
@@ -204,7 +251,19 @@ func (s *Supervisor) KillSession(ctx context.Context, sessionID string) error {
 
 	sess, ok := s.sessions[sessionID]
 	if !ok {
-		return fmt.Errorf("session '%s' not found", sessionID)
+		// Fallback: check saved state on disk
+		diskInfo, err := daemon.GetSessionByID(sessionID)
+		if err != nil {
+			return fmt.Errorf("session '%s' not found", sessionID)
+		}
+		if diskInfo.PID > 0 && daemon.IsPIDAlive(diskInfo.PID) {
+			_ = syscall.Kill(-diskInfo.PID, syscall.SIGTERM)
+			time.Sleep(100 * time.Millisecond)
+			_ = syscall.Kill(-diskInfo.PID, syscall.SIGKILL)
+		}
+		_ = isolation.NewNetnsEngine().DestroySandbox(ctx, &isolation.SandboxInfo{Namespace: diskInfo.Namespace})
+		_ = daemon.RemoveSession(sessionID)
+		return nil
 	}
 
 	sess.mu.Lock()
@@ -216,7 +275,10 @@ func (s *Supervisor) KillSession(ctx context.Context, sessionID string) error {
 
 	if sess.Cmd != nil && sess.Cmd.Process != nil {
 		_ = syscall.Kill(-sess.Cmd.Process.Pid, syscall.SIGTERM)
-		_ = sess.Cmd.Process.Kill()
+		time.Sleep(100 * time.Millisecond)
+		_ = syscall.Kill(-sess.Cmd.Process.Pid, syscall.SIGKILL)
+	} else if sess.Info.PID > 0 && daemon.IsPIDAlive(sess.Info.PID) {
+		_ = syscall.Kill(-sess.Info.PID, syscall.SIGTERM)
 	}
 
 	if sess.Tunnel != nil {
@@ -229,6 +291,7 @@ func (s *Supervisor) KillSession(ctx context.Context, sessionID string) error {
 
 	sess.Info.Status = "stopped"
 	delete(s.sessions, sessionID)
+	_ = daemon.RemoveSession(sessionID)
 
 	return nil
 }
@@ -243,7 +306,9 @@ func (s *Supervisor) CleanupAll(ctx context.Context) {
 			sess.Cancel()
 		}
 		if sess.Cmd != nil && sess.Cmd.Process != nil {
-			_ = sess.Cmd.Process.Kill()
+			_ = syscall.Kill(-sess.Cmd.Process.Pid, syscall.SIGKILL)
+		} else if sess.Info.PID > 0 && daemon.IsPIDAlive(sess.Info.PID) {
+			_ = syscall.Kill(-sess.Info.PID, syscall.SIGKILL)
 		}
 		if sess.Tunnel != nil {
 			_ = sess.Tunnel.Stop()
@@ -253,4 +318,13 @@ func (s *Supervisor) CleanupAll(ctx context.Context) {
 		}
 		delete(s.sessions, id)
 	}
+	_ = daemon.SaveSessionState([]*config.SessionInfo{})
+}
+
+func (s *Supervisor) collectSessionInfoUnlocked() []*config.SessionInfo {
+	var list []*config.SessionInfo
+	for _, sess := range s.sessions {
+		list = append(list, sess.Info)
+	}
+	return list
 }

@@ -21,6 +21,13 @@ var listCmd = &cobra.Command{
 		}
 
 		sessions, _ := daemon.LoadSessionState()
+		// Validate active liveness
+		for _, s := range sessions {
+			if s.Status == "running" && s.PID > 0 && !daemon.IsPIDAlive(s.PID) {
+				s.Status = "stopped"
+			}
+		}
+		_ = daemon.SaveSessionState(sessions)
 
 		w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
 

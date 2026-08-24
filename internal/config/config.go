@@ -1,7 +1,6 @@
 package config
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -11,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/spf13/viper"
+	"gopkg.in/yaml.v3"
 )
 
 var (
@@ -124,7 +124,7 @@ func SaveConfig(cfg *Config) error {
 
 func saveConfigUnlocked(cfg *Config) error {
 	configFile := filepath.Join(GetConfigDir(), "config.yaml")
-	data, err := json.MarshalIndent(cfg, "", "  ")
+	data, err := yaml.Marshal(cfg)
 	if err != nil {
 		return fmt.Errorf("failed to encode config: %w", err)
 	}

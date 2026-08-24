@@ -22,6 +22,10 @@ func (m Model) View() string {
 		return modals.RenderHelpModal(m.Width)
 	}
 
+	if m.ShowTerminalPicker {
+		return m.TerminalPicker.Render(m.Width)
+	}
+
 	if m.ShowProfileForm {
 		return m.ProfileForm.Render(m.Width)
 	}
@@ -77,7 +81,7 @@ func (m Model) View() string {
 
 	// 5. Bottom Hotkeys Bar
 	hotkeys := lipgloss.NewStyle().Foreground(styles.ColorMuted).Render(
-		" [a] Add Profile  [e] Edit  [t] Test  [Enter] Terminal  [l] Launch  [i] Import  [q] Quit",
+		" [t] Spawn Terminal  [a] Add Profile  [e] Edit  [l] Launch App  [i] Import  [q] Quit",
 	)
 
 	return lipgloss.JoinVertical(

@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"skiptui/internal/config"
+	"strings"
 	"sync"
 	"time"
 )
@@ -15,7 +16,7 @@ type ProbeResult struct {
 	Error     error
 }
 
-// TestProfileLatency tests the TCP connect latency to a profile's endpoint.
+// TestProfileLatency tests the network latency to a profile's endpoint.
 func TestProfileLatency(ctx context.Context, p *config.Profile, timeout time.Duration) ProbeResult {
 	if p.Endpoint == "" {
 		return ProbeResult{
@@ -25,10 +26,21 @@ func TestProfileLatency(ctx context.Context, p *config.Profile, timeout time.Dur
 		}
 	}
 
+	endpoint := normalizeEndpoint(p.Endpoint, p.Protocol)
+	network := "tcp"
+
+	if p.Protocol == config.ProtocolWireGuard {
+		network = "udp"
+	} else if p.Protocol == config.ProtocolOpenVPN && p.OpenVPN != nil && p.OpenVPN.Proto == "udp" {
+		network = "udp"
+	}
+
 	start := time.Now()
 	dialer := net.Dialer{Timeout: timeout}
-	conn, err := dialer.DialContext(ctx, "tcp", p.Endpoint)
+	conn, err := dialer.DialContext(ctx, network, endpoint)
 	if err != nil {
+		p.LatencyMs = -1
+		p.LastTested = time.Now()
 		return ProbeResult{
 			ProfileID: p.ID,
 			LatencyMs: -1,
@@ -38,6 +50,9 @@ func TestProfileLatency(ctx context.Context, p *config.Profile, timeout time.Dur
 	defer conn.Close()
 
 	latency := time.Since(start).Milliseconds()
+	if latency == 0 {
+		latency = 1
+	}
 	p.LatencyMs = latency
 	p.LastTested = time.Now()
 
@@ -45,6 +60,26 @@ func TestProfileLatency(ctx context.Context, p *config.Profile, timeout time.Dur
 		ProfileID: p.ID,
 		LatencyMs: latency,
 		Error:     nil,
+	}
+}
+
+func normalizeEndpoint(endpoint string, proto config.ProtocolType) string {
+	if strings.Contains(endpoint, ":") {
+		return endpoint
+	}
+	switch proto {
+	case config.ProtocolSOCKS5:
+		return endpoint + ":1080"
+	case config.ProtocolHTTP:
+		return endpoint + ":8080"
+	case config.ProtocolShadowsocks:
+		return endpoint + ":8388"
+	case config.ProtocolWireGuard:
+		return endpoint + ":51820"
+	case config.ProtocolOpenVPN:
+		return endpoint + ":1194"
+	default:
+		return endpoint + ":1080"
 	}
 }
 

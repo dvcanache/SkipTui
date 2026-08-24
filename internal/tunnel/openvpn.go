@@ -6,6 +6,8 @@ import (
 	"os/exec"
 	"skiptui/internal/config"
 	"skiptui/internal/isolation"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -13,12 +15,12 @@ import (
 
 // OpenVPNTunnel manages an isolated OpenVPN client instance within the network namespace.
 type OpenVPNTunnel struct {
-	sb       *isolation.SandboxInfo
-	profile  *config.Profile
-	cmd      *exec.Cmd
-	bytesRX  uint64
-	bytesTX  uint64
-	running  bool
+	sb      *isolation.SandboxInfo
+	profile *config.Profile
+	cmd     *exec.Cmd
+	bytesRX uint64
+	bytesTX uint64
+	running bool
 }
 
 func NewOpenVPNTunnel(sb *isolation.SandboxInfo, profile *config.Profile) (*OpenVPNTunnel, error) {
@@ -33,8 +35,6 @@ func NewOpenVPNTunnel(sb *isolation.SandboxInfo, profile *config.Profile) (*Open
 }
 
 func (o *OpenVPNTunnel) Start(ctx context.Context) error {
-	// Build command to execute OpenVPN inside the network namespace
-	// Example: ip netns exec <ns> openvpn --config <ovpn> --dev tun0 --redirect-gateway def1
 	var args []string
 	if !o.sb.IsRootless {
 		args = append(args, "netns", "exec", o.sb.Namespace, "openvpn", "--config", o.profile.OpenVPN.ConfigPath, "--dev", "tun0", "--redirect-gateway", "def1")
@@ -79,5 +79,32 @@ func (o *OpenVPNTunnel) Stop() error {
 }
 
 func (o *OpenVPNTunnel) GetMetrics() (uint64, uint64) {
+	if o.running && !o.sb.IsRootless {
+		// Read RX/TX from `ip -n <ns> -s link show tun0`
+		cmd := exec.Command("ip", "-n", o.sb.Namespace, "-s", "link", "show", "tun0")
+		if out, err := cmd.Output(); err == nil {
+			lines := strings.Split(string(out), "\n")
+			for i, line := range lines {
+				line = strings.TrimSpace(line)
+				if strings.HasPrefix(line, "RX:") && i+1 < len(lines) {
+					fields := strings.Fields(lines[i+1])
+					if len(fields) >= 1 {
+						if rx, err := strconv.ParseUint(fields[0], 10, 64); err == nil {
+							atomic.StoreUint64(&o.bytesRX, rx)
+						}
+					}
+				}
+				if strings.HasPrefix(line, "TX:") && i+1 < len(lines) {
+					fields := strings.Fields(lines[i+1])
+					if len(fields) >= 1 {
+						if tx, err := strconv.ParseUint(fields[0], 10, 64); err == nil {
+							atomic.StoreUint64(&o.bytesTX, tx)
+						}
+					}
+				}
+			}
+		}
+	}
 	return atomic.LoadUint64(&o.bytesRX), atomic.LoadUint64(&o.bytesTX)
 }
+

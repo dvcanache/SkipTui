@@ -60,7 +60,45 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		// 3. Handle Interactive Profile Add/Edit Form
+		// 3. Handle Terminal Profile Picker Modal [t]
+		if m.ShowTerminalPicker {
+			switch msg.String() {
+			case "esc":
+				m.ShowTerminalPicker = false
+				return m, nil
+			case "up", "k":
+				m.TerminalPicker.Prev()
+				return m, nil
+			case "down", "j":
+				m.TerminalPicker.Next()
+				return m, nil
+			case "1", "2", "3", "4", "5", "6", "7", "8", "9":
+				idx := int(msg.String()[0] - '1')
+				if idx >= 0 && idx < len(m.TerminalPicker.Profiles) {
+					m.TerminalPicker.SelectedIdx = idx
+				}
+				return m, nil
+			case "enter":
+				prof := m.TerminalPicker.GetSelectedProfile()
+				if prof != nil {
+					sess, err := m.Supervisor.LaunchSession(context.Background(), prof, m.TerminalPicker.Shell, nil, true)
+					if err != nil {
+						m.StatusMsg = fmt.Sprintf("Failed to spawn terminal: %v", err)
+						m.Logs = append(m.Logs, fmt.Sprintf("[%s] Error spawning terminal: %v", time.Now().Format("15:04:05"), err))
+					} else {
+						m.Sessions = m.Supervisor.ListSessions()
+						m.StatusMsg = fmt.Sprintf("✓ Spawned '%s' terminal in session %s (%s)", m.TerminalPicker.Shell, sess.ID, prof.Name)
+						m.Logs = append(m.Logs, fmt.Sprintf("[%s] Launched isolated %s terminal with profile %s (%s)", time.Now().Format("15:04:05"), m.TerminalPicker.Shell, prof.Name, prof.Protocol))
+						m.ActiveTab = TabSessions
+					}
+				}
+				m.ShowTerminalPicker = false
+				return m, nil
+			}
+			return m, nil
+		}
+
+		// 4. Handle Interactive Profile Add/Edit Form
 		if m.ShowProfileForm {
 			switch msg.String() {
 			case "esc":
@@ -95,6 +133,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					} else {
 						m.Profiles = m.Config.Profiles
 						m.Launcher.Profiles = m.Profiles
+						m.TerminalPicker.Profiles = m.Profiles
 						m.StatusMsg = fmt.Sprintf("✓ Saved profile '%s' (%s)", p.Name, p.Endpoint)
 						m.Logs = append(m.Logs, fmt.Sprintf("[%s] Configured %s profile: %s (%s)", time.Now().Format("15:04:05"), p.Protocol, p.Name, p.Endpoint))
 
@@ -134,7 +173,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-		// 4. Handle Importer Modal (with Credentials)
+		// 5. Handle Importer Modal (with Credentials)
 		if m.ShowImporter {
 			switch msg.String() {
 			case "esc":
@@ -160,6 +199,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						} else {
 							m.Profiles = m.Config.Profiles
 							m.Launcher.Profiles = m.Profiles
+							m.TerminalPicker.Profiles = m.Profiles
 							m.StatusMsg = fmt.Sprintf("✓ Imported %s profile '%s'", prof.Protocol, prof.Name)
 							m.Logs = append(m.Logs, fmt.Sprintf("[%s] Imported %s profile: %s (%s)", time.Now().Format("15:04:05"), prof.Protocol, prof.Name, prof.Endpoint))
 
@@ -196,7 +236,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-		// 5. Handle Launcher Modal
+		// 6. Handle Launcher Modal
 		if m.ShowLauncher {
 			switch msg.String() {
 			case "esc":
@@ -241,7 +281,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-		// 6. Global Hotkeys & Screen Navigation
+		// 7. Global Hotkeys & Screen Navigation
 		switch msg.String() {
 		case "q", "ctrl+c":
 			if len(m.Sessions) > 0 {
@@ -302,6 +342,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 
+		case "t":
+			// Open the dedicated Terminal Profile Selection Menu!
+			m.TerminalPicker = modals.NewTerminalPickerModal(m.Profiles)
+			if m.ActiveTab == TabProfiles && m.SelectedProf < len(m.Profiles) {
+				m.TerminalPicker.SelectedIdx = m.SelectedProf
+			}
+			m.ShowTerminalPicker = true
+			return m, nil
+
 		case "a":
 			m.ProfileForm.Reset()
 			m.ShowProfileForm = true
@@ -328,7 +377,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.ShowImporter = true
 			return m, textinput.Blink
 
-		case "t":
+		case "p", "P":
+			// Latency probe hotkey
 			if m.ActiveTab == TabProfiles && len(m.Profiles) > 0 && m.SelectedProf < len(m.Profiles) {
 				p := m.Profiles[m.SelectedProf]
 				m.StatusMsg = fmt.Sprintf("Testing latency for '%s'...", p.Name)
@@ -338,20 +388,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						ProfileID: res.ProfileID,
 						LatencyMs: res.LatencyMs,
 						Error:     res.Error,
-					}
-				}
-			} else if m.ActiveTab == TabSessions {
-				var prof *config.Profile
-				if len(m.Profiles) > 0 {
-					prof = m.Profiles[0]
-				}
-				if prof != nil {
-					sess, err := m.Supervisor.LaunchSession(context.Background(), prof, "zsh", nil, true)
-					if err != nil {
-						m.StatusMsg = fmt.Sprintf("Failed to spawn terminal: %v", err)
-					} else {
-						m.Sessions = m.Supervisor.ListSessions()
-						m.StatusMsg = fmt.Sprintf("Spawned terminal in session %s (%s)", sess.ID, prof.Name)
 					}
 				}
 			}
@@ -402,6 +438,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				_ = m.Config.DeleteProfile(p.ID)
 				m.Profiles = m.Config.Profiles
 				m.Launcher.Profiles = m.Profiles
+				m.TerminalPicker.Profiles = m.Profiles
 				m.StatusMsg = fmt.Sprintf("Deleted profile '%s'", p.Name)
 			}
 			return m, nil

@@ -32,6 +32,9 @@ type Model struct {
 	Height       int
 
 	// Active Modals
+	ShowTerminalPicker bool
+	TerminalPicker     modals.TerminalPickerModal
+
 	ShowLauncher    bool
 	Launcher        modals.LauncherModal
 
@@ -62,24 +65,26 @@ func InitialModel(cfg *config.Config, sup *session.Supervisor) Model {
 	profiles := cfg.Profiles
 
 	return Model{
-		ActiveTab:       TabSessions,
-		Config:          cfg,
-		Supervisor:      sup,
-		Sessions:        sessions,
-		Profiles:        profiles,
-		SelectedSess:    0,
-		SelectedProf:    0,
-		Logs:            []string{"SkipTUI initialized. Ready."},
-		Width:           100,
-		Height:          28,
-		Launcher:        modals.NewLauncherModal(profiles),
-		Importer:        modals.NewImportWizardModal(),
-		ProfileForm:     modals.NewProfileFormModal(),
-		ShowLauncher:    false,
-		ShowImporter:    false,
-		ShowProfileForm: false,
-		ShowExitDialog:  false,
-		ShowHelp:        false,
+		ActiveTab:          TabSessions,
+		Config:             cfg,
+		Supervisor:         sup,
+		Sessions:           sessions,
+		Profiles:           profiles,
+		SelectedSess:       0,
+		SelectedProf:       0,
+		Logs:               []string{"SkipTUI initialized. Ready."},
+		Width:              100,
+		Height:             28,
+		TerminalPicker:     modals.NewTerminalPickerModal(profiles),
+		Launcher:           modals.NewLauncherModal(profiles),
+		Importer:           modals.NewImportWizardModal(),
+		ProfileForm:        modals.NewProfileFormModal(),
+		ShowTerminalPicker: false,
+		ShowLauncher:       false,
+		ShowImporter:       false,
+		ShowProfileForm:    false,
+		ShowExitDialog:     false,
+		ShowHelp:           false,
 	}
 }
 
